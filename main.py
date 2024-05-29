@@ -283,4 +283,7 @@ check_in_queue_df = pd.DataFrame(
     clinic.check_in_queue_length, columns=["time", "check_in_queue_length"]
 )
 check_in_queue_df.to_excel("check_in_queue_length.xlsx", index=False)
+clinic.patient_info_df["service_time"] = (
+    clinic.patient_info_df["leave_time"] - clinic.patient_info_df["check_in_time"]
+)
 clinic.patient_info_df.to_excel("patient_info_df.xlsx", index=False)
