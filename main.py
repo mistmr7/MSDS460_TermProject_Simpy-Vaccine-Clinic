@@ -104,16 +104,16 @@ class VaccineClinic(object):
                 ] = self.env.now
             else:
                 # If time passed has not surpassed the renege time
+                # After check in with receptionist time has passed
+                # continue with the simulation
+                yield self.env.timeout(check_in_line_time)
                 # log time speaking with receptionist and check in queue time
                 logger.trace(
                     f"{patient_id} checked in to the vaccination queue after"
                     + f" {check_in_line_time} seconds in the check in "
-                    f"queue at time {self.env.now + check_in_line_time}. The check-in queue wait "
-                    + f"time was {self.env.now + check_in_line_time - checked_in_time}"
+                    f"queue at time {self.env.now}. The check-in queue wait "
+                    + f"time was {self.env.now - checked_in_time}"
                 )
-                # After check in with receptionist time has passed
-                # continue with the simulation
-                yield self.env.timeout(check_in_line_time)
                 # Remove the patient from the check in queue
                 self.check_in_queue.remove(patient_id)
                 # Add the patient to the vaccination queue
@@ -192,15 +192,16 @@ class VaccineClinic(object):
                 ] = self.env.now
             else:
                 # If patient has not made it to their renege time
-                # Log the time vaccination completed
-                logger.trace(
-                    f"{patient_id} spent {vaccination_time} with the nurse "
-                    + f"at time {self.env.now + vaccination_time}. The "
-                    f"vaccination queue length is {(len(self.vaccination_queue))}."
-                )
+                # Wait vaccination time for vaccination to complete
                 yield self.env.timeout(vaccination_time)
                 # Remove the patient from the vaccination queue
                 self.vaccination_queue.remove(patient_id)
+                # Log the time vaccination completed
+                logger.trace(
+                    f"{patient_id} spent {vaccination_time} with the nurse "
+                    + f"at time {self.env.now}. The vaccination"
+                    f" queue length is {(len(self.vaccination_queue))}."
+                )
                 # Log the vaccination queue length after removing the patient
                 self.vaccination_queue_length.append(
                     [self.env.now, len(self.vaccination_queue)]
@@ -365,7 +366,7 @@ APPOINTMENT_FREQ = 15 * 60  # Appts every 15 mins
 NUM_NURSES = 5
 NUM_RECEPTIONISTS = 2
 REPRODUCIBLE = True  # Use same random seeding if reproducible is true
-SIM_HRS = 1
+SIM_HRS = 12
 SIM_SECS = SIM_HRS * 60 * 60
 # Set up the logging
 logger.add(sys.stderr, format="{message}", level="TRACE")
