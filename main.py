@@ -6,11 +6,14 @@ import sys
 # from functools import partial, wraps
 import simpy
 from loguru import logger
+from icecream import ic
 
 
 class VaccineClinic(object):
-    def __init__(self, env, num_receptionists, num_nurses):
+    def __init__(self, env, num_receptionists, num_nurses, SIM_SECS):
         self.env = env
+        self.num_receptionists = num_receptionists
+        self.num_nurses = num_nurses
         self.receptionist = simpy.PriorityResource(env, num_receptionists)
         self.nurse = simpy.Resource(env, num_nurses)
         self.check_in_queue = []
@@ -24,15 +27,25 @@ class VaccineClinic(object):
                 "balk_max",
                 "renege_max",
                 "check_in_time",
+                "leave_time",
+                "action",
             ]
         )
         self.event_log_df = pd.DataFrame(columns=["patient_id", "action", "time"])
         self.vaccination_queue_length = []
         self.check_in_queue_length = []
+        self.SIM_SECS = SIM_SECS
 
-    def check_in(self, patient_id, patient_priority):
+    def print_stats(self, resource, time1, time2):
+        ic(resource.capacity - resource.count)
+        ic((resource.capacity - resource.count) * (time2 - time1))
+
+    def check_in(self, patient_id, patient_priority, time):
         # Create a normal distribution with a mean of 1 and a SD of 0.5
         # and return the absolute value of that as the check in time.
+        time2 = self.env.now
+        ic(time2 - time)
+        self.print_stats(self.receptionist, time, time2)
         with self.receptionist.request(priority=patient_priority) as req:
             yield req
 
@@ -113,6 +126,12 @@ class VaccineClinic(object):
                 self.add_to_event_log(
                     "Reneged From Vaccination Queue", patient_id, self.env.now
                 )
+                self.patient_info_df.loc[
+                    self.patient_info_df["patient_id"] == patient_id, "action"
+                ] = "Reneged"
+                self.patient_info_df.loc[
+                    self.patient_info_df["patient_id"] == patient_id, "leave_time"
+                ] = self.env.now
             else:
                 logger.trace(
                     f"{patient_id} checked in to the vaccination queue after"
@@ -126,10 +145,17 @@ class VaccineClinic(object):
                 )
                 yield self.env.timeout(vaccination_time)
                 self.add_to_event_log("Vaccinated", patient_id, self.env.now)
+                self.patient_info_df.loc[
+                    self.patient_info_df["patient_id"] == patient_id, "action"
+                ] = "Vaccinated"
+                self.patient_info_df.loc[
+                    self.patient_info_df["patient_id"] == patient_id, "leave_time"
+                ] = self.env.now
 
     def arrive(self):
         patient_id = 0
         while True:
+            time_to_send = self.env.now
             time_between_arrivals = np.abs(np.random.normal(0.5, 0.25, 1)[0]) * 60
             yield self.env.timeout(time_between_arrivals)
             patient_id += 1
@@ -146,14 +172,24 @@ class VaccineClinic(object):
                     + f"The queue length is {len(self.check_in_queue)}"
                 )
                 self.check_in_queue.append(patient_id)
-                self.env.process(self.check_in(patient_id, patient_priority=0))
+                self.env.process(
+                    self.check_in(patient_id, patient_priority=0, time=time_to_send)
+                )
             else:
                 self.add_to_event_log("balk", patient_id, time)
                 logger.trace(
                     f"{patient_id} has balked at the check in line at time {time}"
                 )
                 self.balkers.append(patient_id)
+                self.patient_info_df.loc[
+                    self.patient_info_df["patient_id"] == patient_id, "action"
+                ] = "Balked"
+                self.patient_info_df.loc[
+                    self.patient_info_df["patient_id"] == patient_id, "leave_time"
+                ] = self.env.now
             self.check_in_queue_length.append([time, len(self.check_in_queue)])
+            if self.env.now >= SIM_SECS:
+                return False
 
     def scheduled_arrivals(self):
         patient_id = "A_0"
@@ -169,6 +205,8 @@ class VaccineClinic(object):
                     "balk_max": [20],
                     "renege_max": [1800],
                     "check_in_time": [time],
+                    "leave_time": [0],
+                    "action": [0],
                 }
             )
             self.patient_info_df = pd.concat([self.patient_info_df, scheduled_patient])
@@ -179,8 +217,10 @@ class VaccineClinic(object):
                 + f"The queue length is {len(self.check_in_queue)}"
             )
             self.check_in_queue.insert(0, patient_id)
-            self.env.process(self.check_in(patient_id, patient_priority=-1))
+            self.env.process(self.check_in(patient_id, patient_priority=-1, time=time))
             self.check_in_queue_length.append([time, len(self.check_in_queue)])
+            if self.env.now >= SIM_SECS:
+                return False
 
     def randomize_patient_type(self, patient_id):
         if np.random.binomial(1, RUSHED_PCT / 100) == 1:
@@ -201,6 +241,8 @@ class VaccineClinic(object):
                 "balk_max": [balk_max],
                 "renege_max": [renege_max],
                 "check_in_time": [self.env.now],
+                "leave_time": [0],
+                "action": [0],
             }
         )
         self.patient_info_df = pd.concat([self.patient_info_df, new_patient])
@@ -211,24 +253,24 @@ RUSHED_PCT = 25
 MEAN_VACCINE_TIME = 3
 MEAN_CHECK_IN_TIME = 1
 APPOINTMENT_FREQ = 15 * 60  # Appts every 15 mins
-NUM_NURSES = 6
+NUM_NURSES = 5
 NUM_RECEPTIONISTS = 2
 REPRODUCIBLE = True
 SIM_HRS = 12
 SIM_SECS = SIM_HRS * 60 * 60
 logger.add(sys.stderr, format="{message}", level="TRACE")
 logger.add(
-    f"Vaccine_Clinic_{NUM_RECEPTIONISTS}-{NUM_NURSES}-{int(APPOINTMENT_FREQ/60)}.log",
+    f"Vaccine_Clinic_{SIM_HRS} Hrs -{NUM_RECEPTIONISTS} Recpts-{NUM_NURSES} Nurses-{int(APPOINTMENT_FREQ/60)} min Appts.log",
     level="TRACE",
     format="{message}",
 )
 if REPRODUCIBLE:
     np.random.seed(1111)
 env = simpy.Environment()
-clinic = VaccineClinic(env, NUM_RECEPTIONISTS, NUM_NURSES)
+clinic = VaccineClinic(env, NUM_RECEPTIONISTS, NUM_NURSES, SIM_SECS)
 env.process(clinic.scheduled_arrivals())
 env.process(clinic.arrive())
-env.run(until=SIM_SECS)
+env.run()
 clinic.event_log_df.to_excel(
     f"Vaccine_Clinic_Log-{NUM_RECEPTIONISTS}-{NUM_NURSES}-{int(APPOINTMENT_FREQ/60)}.xlsx",
     index=False,
@@ -241,3 +283,4 @@ check_in_queue_df = pd.DataFrame(
     clinic.check_in_queue_length, columns=["time", "check_in_queue_length"]
 )
 check_in_queue_df.to_excel("check_in_queue_length.xlsx", index=False)
+clinic.patient_info_df.to_excel("patient_info_df.xlsx", index=False)
