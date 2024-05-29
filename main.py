@@ -35,10 +35,18 @@ class VaccineClinic(object):
         self.vaccination_queue_length = []
         self.check_in_queue_length = []
         self.SIM_SECS = SIM_SECS
+        self.nurse_wasted_time = []
+        self.receptionist_wasted_time = []
 
     def print_stats(self, resource, time1, time2):
-        ic(resource.capacity - resource.count)
-        ic((resource.capacity - resource.count) * (time2 - time1))
+        if resource == self.nurse:
+            self.nurse_wasted_time.append(
+                (resource.capacity - resource.count) * (time2 - time1)
+            )
+        else:
+            self.receptionist_wasted_time.append(
+                (resource.capacity - resource.count) * (time2 - time1)
+            )
 
     def check_in(self, patient_id, patient_priority, time):
         # Create a normal distribution with a mean of 1 and a SD of 0.5
@@ -79,7 +87,7 @@ class VaccineClinic(object):
                 self.add_to_event_log(
                     "Switch to Vaccination Queue", patient_id, self.env.now
                 )
-                self.env.process(self.vaccinate(patient_id))
+                self.env.process(self.vaccinate(patient_id, time))
 
     def grab_renege_and_check_in_times(self, patient_id):
         renege_time = self.patient_info_df.loc[
@@ -96,9 +104,11 @@ class VaccineClinic(object):
         )
         self.event_log_df = pd.concat([self.event_log_df, event_log_row])
 
-    def vaccinate(self, patient_id):
+    def vaccinate(self, patient_id, time):
         # Create a normal distribution with a mean of 2 and a SD of 1
         # and return the absolute value of that as the vaccination time.
+        time2 = self.env.now
+        self.print_stats(self.nurse, time, time2)
         with self.nurse.request() as req:
             yield req
             vaccination_time = np.abs(np.random.normal(MEAN_VACCINE_TIME, 1, 1)[0]) * 60
@@ -256,7 +266,7 @@ APPOINTMENT_FREQ = 15 * 60  # Appts every 15 mins
 NUM_NURSES = 5
 NUM_RECEPTIONISTS = 2
 REPRODUCIBLE = True
-SIM_HRS = 12
+SIM_HRS = 1
 SIM_SECS = SIM_HRS * 60 * 60
 logger.add(sys.stderr, format="{message}", level="TRACE")
 logger.add(
@@ -265,7 +275,7 @@ logger.add(
     format="{message}",
 )
 if REPRODUCIBLE:
-    np.random.seed(1111)
+    np.random.seed(1112)
 env = simpy.Environment()
 clinic = VaccineClinic(env, NUM_RECEPTIONISTS, NUM_NURSES, SIM_SECS)
 env.process(clinic.scheduled_arrivals())
@@ -287,3 +297,18 @@ clinic.patient_info_df["service_time"] = (
     clinic.patient_info_df["leave_time"] - clinic.patient_info_df["check_in_time"]
 )
 clinic.patient_info_df.to_excel("patient_info_df.xlsx", index=False)
+clinic.patient_info_df[clinic.patient_info_df["action"] == "Balked"].to_excel(
+    "patient_balk_df.xlsx", index=False
+)
+clinic.patient_info_df[clinic.patient_info_df["action"] == "Reneged"].to_excel(
+    "patient_renege_df.xlsx", index=False
+)
+
+nurse_wasted_df = pd.DataFrame(clinic.nurse_wasted_time, columns=["Nurse Free Time"])
+nurse_wasted_df.to_excel("nurse_wasted_time.xlsx", index=False)
+
+
+receptionist_wasted_df = pd.DataFrame(
+    clinic.receptionist_wasted_time, columns=["Receptionist Free Time"]
+)
+receptionist_wasted_df.to_excel("Receptionist_wasted_time.xlsx", index=False)
