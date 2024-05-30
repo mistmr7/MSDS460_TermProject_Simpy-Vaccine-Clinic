@@ -7,6 +7,7 @@ import sys
 import simpy
 from loguru import logger
 from icecream import ic
+import time
 
 
 class VaccineClinic(object):
@@ -25,6 +26,7 @@ class VaccineClinic(object):
         # Start a list of balkers and renegers
         self.balkers = []
         self.renegers = []
+        self.vaccinated = []
         # Initialize a DataFrame for full patient info
         self.patient_info_df = pd.DataFrame(
             columns=[
@@ -216,6 +218,7 @@ class VaccineClinic(object):
                 self.patient_info_df.loc[
                     self.patient_info_df["patient_id"] == patient_id, "leave_time"
                 ] = self.env.now
+                self.vaccinated.append(patient_id)
 
     def arrive(self):
         # Function set for walk-in arrivals
@@ -227,7 +230,9 @@ class VaccineClinic(object):
             time_to_send = self.env.now
             # Set the average time between arrivals to 30 seconds with 15 seconds
             # standard deviation and randomize
-            time_between_arrivals = np.abs(np.random.normal(0.5, 0.25, 1)[0]) * 60
+            time_between_arrivals = self.create_patient_flow_rates(
+                HIGH_FLOW_RATE, LOW_FLOW_RATE
+            )
             # Wait until someone arrives to continue
             yield self.env.timeout(time_between_arrivals)
             # Add patient ID
@@ -358,13 +363,98 @@ class VaccineClinic(object):
         self.patient_info_df = pd.concat([self.patient_info_df, new_patient])
         return pd.concat([self.patient_info_df, new_patient])
 
+    def create_patient_flow_rates(self, high_flow_rate, low_flow_rate):
+        """
+        high_flow_rate {float}: Mins between average patient walk in for high flow times
+        low_flow_rate {float}: mins between average patient walk in for low flow times
+        """
+        time = self.env.now
+        # If it's between 7 am and 9 am
+        if time < (7200):
+            # Use the high flow rate to designate before work hours
+            time_between_arrivals = (
+                np.abs(np.random.normal(high_flow_rate, high_flow_rate / 2, 1)[0]) * 60
+            )
+        elif 7200 <= time <= 14400:
+            # If it's between 9 am and 11 am use the low flow rate
+            time_between_arrivals = (
+                np.abs(np.random.normal(low_flow_rate, low_flow_rate / 2, 1)[0]) * 60
+            )
+        elif 14400 < time < 25200:
+            # If it's between 11 am and 2 pm use the high flow rate
+            time_between_arrivals = (
+                np.abs(np.random.normal(high_flow_rate, high_flow_rate / 2, 1)[0]) * 60
+            )
+        elif 25200 <= time <= 36000:
+            # If it's between 2 pm and 5 pm use low flow rate
+            time_between_arrivals = (
+                np.abs(np.random.normal(low_flow_rate, low_flow_rate / 2, 1)[0]) * 60
+            )
+        elif time > 36000:
+            # If it's after 5 pm to close use the high flow rate
+            time_between_arrivals = (
+                np.abs(np.random.normal(high_flow_rate, high_flow_rate / 2, 1)[0]) * 60
+            )
+        return time_between_arrivals
+
+
+def create_excel_files(clinic, unique_names=False):
+    # If suffix is True, add variable amounts to each excel file
+    if unique_names:
+        suffix = f"-{NUM_RECEPTIONISTS}R-{NUM_NURSES}N-{int(APPOINTMENT_FREQ/60)}A"
+    else:
+        suffix = ""
+    # create event log excel file
+    clinic.event_log_df.to_excel(
+        f"Vaccine_Clinic_Log{suffix}.xlsx",
+        index=False,
+    )
+    # Create Vax Queue length excel file
+    vax_queue_df = pd.DataFrame(
+        clinic.vaccination_queue_length, columns=["time", "vaccination_queue_length"]
+    )
+    vax_queue_df.to_excel(f"vaccination_queue_length{suffix}.xlsx", index=False)
+    # Create Check-In Queue length excel file
+    check_in_queue_df = pd.DataFrame(
+        clinic.check_in_queue_length, columns=["time", "check_in_queue_length"]
+    )
+    check_in_queue_df.to_excel(f"check_in_queue_length{suffix}.xlsx", index=False)
+    # Calculate the total time each patient spent at the clinic
+    clinic.patient_info_df["service_time"] = (
+        clinic.patient_info_df["leave_time"] - clinic.patient_info_df["check_in_time"]
+    )
+    # Create excel file from patient info dataframe
+    clinic.patient_info_df.to_excel(f"patient_info_df{suffix}.xlsx", index=False)
+    # Create balked patient dataframe from filtered patient info dataframe
+    clinic.patient_info_df[clinic.patient_info_df["action"] == "Balked"].to_excel(
+        f"patient_balk_df{suffix}.xlsx", index=False
+    )
+    # Create reneged patient dataframe from filtered patient info dataframe
+    clinic.patient_info_df[clinic.patient_info_df["action"] == "Reneged"].to_excel(
+        f"patient_renege_df{suffix}.xlsx", index=False
+    )
+    # Create a nurse wasted time excel file from available nurse times
+    nurse_wasted_df = pd.DataFrame(
+        clinic.nurse_wasted_time, columns=["Nurse Free Time"]
+    )
+    nurse_wasted_df.to_excel(f"nurse_wasted_time{suffix}.xlsx", index=False)
+    # Create a receptionist wasted time excel file from available receptionist times
+    receptionist_wasted_df = pd.DataFrame(
+        clinic.receptionist_wasted_time, columns=["Receptionist Free Time"]
+    )
+    receptionist_wasted_df.to_excel(
+        f"Receptionist_wasted_time{suffix}.xlsx", index=False
+    )
+
 
 RUSHED_PCT = 25  # Set percent of rushed patients
 MEAN_VACCINE_TIME = 3
 MEAN_CHECK_IN_TIME = 1
+HIGH_FLOW_RATE = 0.25
+LOW_FLOW_RATE = 0.5
 APPOINTMENT_FREQ = 15 * 60  # Appts every 15 mins
-NUM_NURSES = 5
-NUM_RECEPTIONISTS = 2
+NUM_NURSES = 1
+NUM_RECEPTIONISTS = 1
 REPRODUCIBLE = True  # Use same random seeding if reproducible is true
 SIM_HRS = 12
 SIM_SECS = SIM_HRS * 60 * 60
@@ -375,53 +465,63 @@ logger.add(
     level="TRACE",
     format="{message}",
 )
+logger.add("Summary_Output.log", level="INFO", format="{message}")
 # Set the random seed if reproducible set to true
 if REPRODUCIBLE:
     np.random.seed(1112)
-# Initialize the environment
-env = simpy.Environment()
-# Initialize the clinic
-clinic = VaccineClinic(env, NUM_RECEPTIONISTS, NUM_NURSES)
-# Start the scheduled arrivals process for the environment
-env.process(clinic.scheduled_arrivals())
-# Start the walk in arrivals process for the environment
-env.process(clinic.arrive())
-# Run the environment
-env.run()
-# create event log excel file
-clinic.event_log_df.to_excel(
-    f"Vaccine_Clinic_Log-{NUM_RECEPTIONISTS}-{NUM_NURSES}-{int(APPOINTMENT_FREQ/60)}.xlsx",
-    index=False,
+scenarios = []
+for i in range(1, 11):
+    for j in range(1, 11):
+        scenarios.append([i, j])
+
+tic = time.perf_counter()
+num_nurses = []
+num_receptionists = []
+num_balkers = []
+num_renegers = []
+num_vaccinated = []
+
+for scenario in scenarios:
+    # Initialize the environment
+    env = simpy.Environment()
+    # Initialize the clinic
+    clinic = VaccineClinic(env, scenario[0], scenario[1])
+    # Start the scheduled arrivals process for the environment
+    env.process(clinic.scheduled_arrivals())
+    # Start the walk in arrivals process for the environment
+    env.process(clinic.arrive())
+    # Run the environment
+    env.run()
+
+    # create_excel_files(clinic, True)
+    logger.info(f"{scenario[0]} Receptionists | {scenario[1]} Nurses")
+    logger.info("===========================================================")
+    logger.info(f"Nurses spent {sum(clinic.nurse_wasted_time)} seconds free.")
+    logger.info(
+        f"Receptionists spent {sum(clinic.receptionist_wasted_time)} seconds free."
+    )
+    logger.info(f"{len(clinic.renegers)} patients reneged during their visit.")
+    logger.info(f"{len(clinic.balkers)} patients balked from the check in queue.")
+    logger.info(f"{len(clinic.vaccinated)} patients were successfully vaccinated.")
+    logger.info(
+        f"{round(len(clinic.vaccinated)/(len(clinic.vaccinated) + len(clinic.balkers) + len(clinic.renegers)) * 100, 1)} "
+        + f"percent of patients were successfully vaccinated with {scenario[0]} receptionists "
+        + f"and {scenario[1]} nurses working.\n\n"
+    )
+    num_nurses.append(scenario[1])
+    num_receptionists.append(scenario[0])
+    num_renegers.append(len(clinic.renegers))
+    num_balkers.append(len(clinic.balkers))
+    num_vaccinated.append(len(clinic.vaccinated))
+toc = time.perf_counter()
+ic(f"{toc-tic} seconds have passed.")
+summary_runs_df = pd.DataFrame(
+    {
+        "Nurses": num_nurses,
+        "Receptionists": num_receptionists,
+        "Balkers": num_balkers,
+        "Renegers": num_renegers,
+        "Vaccinated": num_vaccinated,
+    }
 )
-# Create Vax Queue length excel file
-vax_queue_df = pd.DataFrame(
-    clinic.vaccination_queue_length, columns=["time", "vaccination_queue_length"]
-)
-vax_queue_df.to_excel("vaccination_queue_length.xlsx", index=False)
-# Create Check-In Queue length excel file
-check_in_queue_df = pd.DataFrame(
-    clinic.check_in_queue_length, columns=["time", "check_in_queue_length"]
-)
-check_in_queue_df.to_excel("check_in_queue_length.xlsx", index=False)
-# Calculate the total time each patient spent at the clinic
-clinic.patient_info_df["service_time"] = (
-    clinic.patient_info_df["leave_time"] - clinic.patient_info_df["check_in_time"]
-)
-# Create excel file from patient info dataframe
-clinic.patient_info_df.to_excel("patient_info_df.xlsx", index=False)
-# Create balked patient dataframe from filtered patient info dataframe
-clinic.patient_info_df[clinic.patient_info_df["action"] == "Balked"].to_excel(
-    "patient_balk_df.xlsx", index=False
-)
-# Create reneged patient dataframe from filtered patient info dataframe
-clinic.patient_info_df[clinic.patient_info_df["action"] == "Reneged"].to_excel(
-    "patient_renege_df.xlsx", index=False
-)
-# Create a nurse wasted time excel file from available nurse times
-nurse_wasted_df = pd.DataFrame(clinic.nurse_wasted_time, columns=["Nurse Free Time"])
-nurse_wasted_df.to_excel("nurse_wasted_time.xlsx", index=False)
-# Create a receptionist wasted time excel file from available receptionist times
-receptionist_wasted_df = pd.DataFrame(
-    clinic.receptionist_wasted_time, columns=["Receptionist Free Time"]
-)
-receptionist_wasted_df.to_excel("Receptionist_wasted_time.xlsx", index=False)
+summary_runs_df.to_excel("summary_runs.xlsx", index=False)
